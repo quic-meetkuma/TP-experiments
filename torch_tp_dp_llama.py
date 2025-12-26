@@ -207,7 +207,7 @@ def fine_tune_llama32(args):
     model_name = "meta-llama/Llama-3.2-1B"
     tp_size = args.tp
     dp_size = args.dp
-    use_sequence_parallel = True
+    use_sequence_parallel = False
     use_loss_parallel = False
 
     if rank == 0:
@@ -222,7 +222,7 @@ def fine_tune_llama32(args):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
         device_map=None,
     ).to(device)
 
