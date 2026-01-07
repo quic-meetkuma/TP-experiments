@@ -186,14 +186,14 @@ def setup_tp_ddp_model(
     model = parallelize_module(model, tp_mesh, parallelize_plan)
     _pre_dp_module_transform(model)
 
-    if device_type == "qaic":
-        device_ids = [dist.get_rank() % torch.qaic.device_count()]
-    elif device_type == "cuda":
-        device_ids = [dist.get_rank() % torch.cuda.device_count()]
-    else:
-        raise RuntimeError("Unsupported device type.")
+    # if device_type == "qaic":
+    #     device_ids = [dist.get_rank() % torch.qaic.device_count()]
+    # elif device_type == "cuda":
+    #     device_ids = [dist.get_rank() % torch.cuda.device_count()]
+    # else:
+    #     raise RuntimeError("Unsupported device type.")
 
-    model = DDP(model, process_group=dp_pg, device_ids=device_ids)
+    model = DDP(model, process_group=dp_pg)
 
     return model, dp_pg, mesh_2d, dp_size
 
