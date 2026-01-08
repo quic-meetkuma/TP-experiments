@@ -1,6 +1,7 @@
 import os
 import torch
 import argparse
+import torch.nn as nn
 from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -14,9 +15,27 @@ from accelerate.utils import ParallelismConfig
 from torch.distributed.tensor.parallel.ddp import _pre_dp_module_transform
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
 
 # Command:
-# QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 run_tp_generic.py --force_device qaic --tp_size 2 --dp_size 2
+# QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 hf_trainer_accelerate_tp_dp.py --force_device qaic --tp_size 2 --dp_size 2
+
+# Status as of 8th Jan, 2026
+# Only DDP:
+#   Command: QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=2 --master-port=1234 hf_trainer_accelerate_tp_dp.py --force_device qaic --dp_size 2
+#   Status: Works fine without any issues.
+# Only TP:
+#   Command: QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=2 --master-port=1234 hf_trainer_accelerate_tp_dp.py --force_device qaic --tp_size 2
+#   Status: Works fine without any issues
+# TP+DDP:
+#   Command: QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 hf_trainer_accelerate_tp_dp.py --force_device qaic --tp_size 2 --dp_size 2
+#   Status:
+#       - With max_grad_norm set to 1.0 (default) value, we are getting attempting to unscale already unscaled params.
+#         If we set max_grad_norm to None then we can get rid of that error.
+#       - But with max_grad_norm set to None, we are now getting error "AssertionError: No inf checks were recorded prior to update.""
+#       - TODO: Apart from above issue, need to make sure that the grads are divided by DDP rank rather than world size.
+#               (Reference: https://github.com/meta-pytorch/torchtune/blob/44271b570af36cfda8ee20a4479d2652770378c0/recipes/full_finetune_distributed.py#L1037)
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -34,14 +53,19 @@ def parse_arguments():
 
 def setup_parallelism(tp_size, dp_size):
     """Set up tensor parallelism configuration."""
-    parallelism_config = {"tp_size": tp_size, "dp_replicate_size": dp_size}
+    parallelism_config = {}
+    if tp_size is not None:
+        parallelism_config["tp_size"] = tp_size
+    if dp_size is not None:
+        parallelism_config["dp_replicate_size"] = dp_size
+
     pc = ParallelismConfig(**parallelism_config)
     print(f"{pc.total_size=}")
     return pc
 
 def create_training_arguments(args, pc):
     """Create training arguments with appropriate settings."""
-    from trl.trainer.sft_config import SFTConfig
+    # from trl.trainer.sft_config import SFTConfig
     # return SFTConfig(
     return TrainingArguments(
         output_dir=args.output_dir,
@@ -52,7 +76,8 @@ def create_training_arguments(args, pc):
         fp16=True,
         parallelism_config=pc,
         ddp_find_unused_parameters=False,
-        remove_unused_columns=False,
+        remove_unused_columns=True,
+        max_grad_norm=None,      # This is the root cause for unscale called twice. Will solve it later.
         # fsdp='no_shard',
         # fsdp_config={
         #     "fsdp_version" : 2,
@@ -73,27 +98,38 @@ def load_tokenizer(model_name):
 
 def load_model(model_name, device_mesh):
     """Load model with tensor parallelism."""
-    tp_mesh = device_mesh["tp"]
-    dp_mesh = device_mesh["dp_replicate"]
-    print(f"Loading model {model_name} with tensor parallelism (tp_size={tp_mesh.size()}) and data parallelism (dp_size={dp_mesh.size()})")
-    
+    # if hasattr(device_mesh, )
+    tp_enabled = False
+    dp_enabled = False
+    dp_size = 1
+    tp_size = 1
+    if "dp_replicate" in device_mesh.mesh_dim_names:
+        dp_enabled = True
+        dp_mesh = device_mesh["dp_replicate"]
+        dp_size = dp_mesh.size()
+    if "tp" in device_mesh.mesh_dim_names:
+        tp_enabled = True
+        tp_mesh = device_mesh["tp"]
+        tp_size = tp_mesh.size()
+
+    assert tp_enabled or dp_enabled, "Either TP or DP must be enabled for this experiment. Both are disabled. Check your device mesh."
+    print(f"Loading model {model_name} with tensor parallelism (tp_size={tp_size}) and data parallelism (dp_size={dp_size})")
+
+    kwargs = {}
+    if tp_enabled:
+        kwargs["tp_plan"] = "auto"
+        kwargs["tp_size"] = tp_mesh.size()
+        kwargs["device_mesh"] = tp_mesh
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16,
-        tp_plan="auto",
-        tp_size=tp_mesh.size(),
-        device_mesh=tp_mesh
+        **kwargs,
     )
-    
-    # for name, param in model.named_parameters():
-    #     if name == "model.layers.6.mlp.gate_proj.weight":
-    #         param.requires_grad = True
-    #         # param = param.to(torch.float32)
-    #         param.data = param.data.to(torch.float32)
-    #     else:
-    #         param.requires_grad = False
-    print(f"Model tp size: {model.tp_size}")
-            
+    # Need to explicitly untie the embedding weights here to consider
+    # this as separate params in further TP processing
+    model.lm_head.weight = nn.Parameter(model.lm_head.weight.clone())
+
     # _pre_dp_module_transform(model)
 
     # Wrap with DDP using data parallel group
@@ -117,32 +153,39 @@ def create_dummy_dataset():
 def tokenize_function(examples, tokenizer):
     """Tokenize dataset examples."""
     tokenized = tokenizer(
-        examples["text"], 
-        padding="max_length", 
-        truncation=True, 
-        max_length=128, 
+        examples["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=128,
         return_tensors="pt"
     )
     tokenized["labels"] = tokenized["input_ids"].clone()
     return tokenized
 
 
-def main():
-    """Main training function."""
-    # Parse arguments
-    args = parse_arguments()
-    
+def initialize_distributed(args):
     WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
     LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-    
-    import torch.distributed as dist
+
+    if args.force_device == "cuda":
+        backend = "nccl"
+    else:
+        backend = "cpu:gloo,qaic:qccl"
+
     dist.init_process_group(
-        backend="cpu:gloo,qaic:qccl",       # "nccl" for GPUs, "gloo" for CPUs
+        backend=backend,       # "nccl" for GPUs, "gloo" for CPUs
         init_method="env://", # how processes connect (env vars, file, tcp, etc.)
         world_size=WORLD_SIZE,         # total number of processes
         rank=LOCAL_RANK,                # unique ID for this process
     )
-    
+
+def main():
+    """Main training function."""
+    # Parse arguments
+    args = parse_arguments()
+
+    initialize_distributed(args)  # Initialize distributed training
+
     # Setup tensor parallelism
     pc = setup_parallelism(args.tp_size, args.dp_size)
     device_mesh = pc.build_device_mesh(args.force_device)
@@ -150,21 +193,13 @@ def main():
 
     # Create training arguments
     training_args = create_training_arguments(args, pc)
-    # if args.dp_size > 0:
-    #     training_args.fsdp_plugin_args["activation_checkpointing"] = False
-    #     training_args.fsdp_plugin_args["state_dict_type"] = "SHARDED_STATE_DICT"
-    #     training_args.fsdp_plugin_args["fsdp_version"] = 2
-    #     training_args.fsdp_plugin_args["reshard_after_forward"] = True
-    #     training_args.fsdp_plugin_args["auto_wrap_policy"] = "transformer_based_wrap"
-    #     training_args.fsdp_plugin_args["cpu_ram_efficient_loading"] = True
-    #     training_args.fsdp_plugin_args["forward_prefetch"] = None
-    
+
     # Load tokenizer
     tokenizer = load_tokenizer(args.model_name)
-    
+
     # Load model
     # device_mesh = pc.get_device_mesh(args.force_device)
-    
+
     # Setup 2D device mesh
     # mesh_2d = init_device_mesh(
     #     args.force_device,
@@ -173,63 +208,42 @@ def main():
     #     mesh_dim_names=("dp", "tp"),
     #     # mesh_dim_names=("dp",),
     # )
-    
+
     model = load_model(args.model_name, device_mesh)
     print(f"Model loaded on device: {model.device}")
-    
+
     # Create dataset
     dataset = create_dummy_dataset()
-    
+
     # Tokenize dataset
     tokenized_dataset = dataset.map(
-        lambda x: tokenize_function(x, tokenizer), 
+        lambda x: tokenize_function(x, tokenizer),
         batched=True
     )
-    
-    # Create data collator
-    # data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
-    
-    from peft import LoraConfig
-    from trl import SFTTrainer
-    peft_config = LoraConfig(
-        r=16,                      # rank
-        lora_alpha=32,             # scaling factor
-        lora_dropout=0.05,          # dropout
-        bias="none",
-        task_type="CAUSAL_LM",       # task type
-        target_modules=["q_proj","v_proj"]
-    )
 
-    
+    # Create data collator
+    data_collator = DataCollatorWithPadding(tokenizer, padding=True, max_length=128)
+
+    # from peft import LoraConfig
+    # from trl import SFTTrainer
+    # peft_config = LoraConfig(
+    #     r=16,                      # rank
+    #     lora_alpha=32,             # scaling factor
+    #     lora_dropout=0.05,          # dropout
+    #     bias="none",
+    #     task_type="CAUSAL_LM",       # task type
+    #     target_modules=["q_proj","v_proj"]
+    # )
+
+
     # Create trainer
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
-        processing_class=tokenizer,
+        data_collator=data_collator,
         # peft_config=peft_config,
-        # data_collator=data_collator,
     )
-
-    # kwargs = {}
-    # if training_args.ddp_find_unused_parameters is not None:
-    #     kwargs["find_unused_parameters"] = training_args.ddp_find_unused_parameters
-    # elif isinstance(model, PreTrainedModel):
-    #     # find_unused_parameters breaks checkpointing as per
-    #     # https://github.com/huggingface/transformers/pull/4659#issuecomment-643356021
-    #     kwargs["find_unused_parameters"] = not model.is_gradient_checkpointing
-    # else:
-    #     kwargs["find_unused_parameters"] = True
-
-    # if training_args.ddp_bucket_cap_mb is not None:
-    #     kwargs["bucket_cap_mb"] = training_args.ddp_bucket_cap_mb
-
-    # if training_args.ddp_broadcast_buffers is not None:
-    #     kwargs["broadcast_buffers"] = training_args.ddp_broadcast_buffers
-
-    # kwargs["process_group"] = dp_pg
-    # from accelerate.utils import DistributedDataParallelKwargs
-    # trainer.accelerator.ddp_handler = DistributedDataParallelKwargs(**kwargs)
 
     # Train model
     trainer.train()
