@@ -37,6 +37,21 @@ import torch.distributed as dist
 #       - TODO: Apart from above issue, need to make sure that the grads are divided by DDP rank rather than world size.
 #               (Reference: https://github.com/meta-pytorch/torchtune/blob/44271b570af36cfda8ee20a4479d2652770378c0/recipes/full_finetune_distributed.py#L1037)
 
+# Status as of 9th Jan, 2026
+# TP+DDP:
+#   Command: QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 hf_trainer_accelerate_tp_dp.py --force_device qaic --tp_size 2 --dp_size 2
+#   Status:
+#       - The previous issues were observed on GPU with accelerate==1.12.0 and transformers==4.57.3. These are installed
+#         from open source. We now have a internal fork of accelerate==1.12.0 and transformers=5.0.0 with qaic backend changes.
+#         Installing both from internal fork resolves the "No inf checks were recorded prior to update." issue. The issue with
+#         max_grad_norm still remains to be debugged.
+#       - This means now TP+DP works fine on QAIC as well as GPU with the internal fork of accelerate and transformers.
+#   Note:
+#       - Internal fork of transformers: https://github.com/quic-meetkuma/transformers/tree/qaic_support_transformer_20_12_2025 (Commit id: 9cd1f690c95cb526600dd0d4ab32bf7d4a58d720)
+#       - Internal fork of accelerate: https://github.com/quic-meetkuma/accelerate/tree/v1.12.0-release-shubham-changes-dp-tp (Commit id: 4ebcbddc01be1b7441fc1ee9ba9b9fd474fdcb14)
+#       - Use init.sh for installing the internal forks.
+
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Run tensor parallel training on GPU or QAIC")
