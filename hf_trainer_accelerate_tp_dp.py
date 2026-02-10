@@ -63,8 +63,8 @@ from transformers.integrations.tensor_parallel import (
 #   Status:
 #       - With PEFT modification, now TP+DP along with LoRA layer works fine on QAIC with the internal fork of accelerate and transformers.
 #   Note:
-#       - Internal fork of transformers: https://github.com/quic-meetkuma/transformers/tree/qaic_support_transformer_v5.1-release (Commit id: c81b41320255219001958793031f437f1225a3d0)
-#       - Internal fork of accelerate: https://github.com/quic-meetkuma/accelerate/tree/v1.12.0-release-shubham-changes-dp-tp (Commit id: 0ec678862e30008e81a9aacaa582deb6506bee65)
+#       - Internal fork of transformers: https://github.com/quic-meetkuma/transformers/tree/qaic_support_transformer_v5.1-release (Commit id: 94c99d7e936d24ba0677a80fdc2f7cc9fdb7fc87)
+#       - Internal fork of accelerate: https://github.com/quic-meetkuma/accelerate/tree/10_02_26_shubham_changes_dp_tp (Commit id: 43fc8626244b7d9b05b7df1fc09fac2ad0bfda12)
 #       - Use init.sh for installing the internal forks.
 
 
