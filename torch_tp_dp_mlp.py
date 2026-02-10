@@ -14,13 +14,13 @@ from torch.distributed.tensor.parallel import (
 from torch.distributed.tensor.parallel.ddp import _pre_dp_module_transform
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-
 # Command:
 # QAIC_VISIBLE_DEVICES=60,61,62,63 torchrun --nproc_per_node=4 --master-port=1234 torch_tp_dp_v2.py --tp 2 --dp 2 --device qaic
 # This code runs fine on QAIC.
 
 # Code reference:
 # 1. https://github.com/pytorch/pytorch/blob/7de041cb5a5817500b973eb32a70325187a83407/test/distributed/_composable/test_composability/test_2d_composability.py#L478
+
 
 # Define your model
 class MLPModule(torch.nn.Module):
@@ -41,9 +41,16 @@ class MLPModule(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser(description="Run TP + DP with PyTorch Distributed")
-    parser.add_argument("--device", type=str, required=True, choices=["cuda", "qaic"],
-                        help="Device type: 'cuda' or 'qaic'")
-    parser.add_argument("--tp", type=int, required=True, help="Tensor Parallelism Degree")
+    parser.add_argument(
+        "--device",
+        type=str,
+        required=True,
+        choices=["cuda", "qaic"],
+        help="Device type: 'cuda' or 'qaic'",
+    )
+    parser.add_argument(
+        "--tp", type=int, required=True, help="Tensor Parallelism Degree"
+    )
     parser.add_argument("--dp", type=int, required=True, help="Data Parallelism Degree")
     args = parser.parse_args()
 
@@ -53,7 +60,9 @@ def main():
 
     # Ensure WORLD_SIZE matches tp * dp
     world_size = int(os.getenv("WORLD_SIZE", 1))
-    assert world_size == tp_degree * dp_degree, f"WORLD_SIZE ({world_size}) must equal tp * dp ({tp_degree} * {dp_degree})"
+    assert (
+        world_size == tp_degree * dp_degree
+    ), f"WORLD_SIZE ({world_size}) must equal tp * dp ({tp_degree} * {dp_degree})"
 
     rank = int(os.getenv("LOCAL_RANK", 0))
     backend = "qccl" if device_type == "qaic" else "nccl"

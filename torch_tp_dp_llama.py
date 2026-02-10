@@ -19,15 +19,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datetime import timedelta
 
-
 # Command:
-# QAIC_VISIBLE_DEVICES=60,61,62,63 torchrun --nproc_per_node=4 --master-port=1234 torch_tp_dp_v2.py --tp 2 --dp 2 --device qaic
+# QAIC_VISIBLE_DEVICES=60,61,62,63 torchrun --nproc_per_node=4 --master-port=1234 torch_tp_dp_llama.py --tp 2 --dp 2 --device qaic
 # Facing below error when running on QAIC:
 # [rank2]: RuntimeError: Backend qccl does not support reduce_scatter_tensor_coalesced
 
 # Code reference:
 # 1. https://github.com/pytorch/pytorch/blob/7de041cb5a5817500b973eb32a70325187a83407/test/distributed/_composable/test_composability/test_2d_composability.py#L478
 # 2. Torchtitan for llama parallelisation code
+
 
 def setup_distributed(device_type: str):
     """Initialize distributed training environment."""
@@ -256,6 +256,24 @@ def fine_tune_llama32(args):
     if rank == 0:
         print(f"Starting training for {num_epochs} epochs...")
 
+    if args.use_amp:
+        autocast_cm = torch.autocast(device_type=args.device, dtype=torch.float16)
+        if args.device == "qaic":
+            # Lazily imported qaic's GradScaler when it is actually needed.
+            from torch.qaic.amp import GradScaler as QAicGradScaler
+
+            scaler = QAicGradScaler()
+        elif args.device == "cuda":
+            # Lazily imported torch's GradScaler when it is actually needed.
+            from torch.amp import GradScaler
+
+            scaler = GradScaler(args.device)
+    else:
+        from contextlib import nullcontext
+
+        autocast_cm = nullcontext()
+        scaler = None
+
     for epoch in range(num_epochs):
         dp_rank = dist.get_rank(dp_pg)
 
@@ -272,14 +290,30 @@ def fine_tune_llama32(args):
             max_length=512,
         ).to(device)
 
-        outputs = model(**inputs, labels=inputs["input_ids"])
-
-        loss = outputs.loss
         optimizer.zero_grad()
-        loss.backward()
+        # Forward pass with autocast with autocast():
+        with autocast_cm:
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if args.use_amp:
+
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    print(
+                        f"Name: {name}, Param shape: {param.shape}, Param dtype: {param.dtype}, Grad shape: {param.grad.shape}, Grad dtype: {param.grad.dtype}"
+                    )
+
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+            # scaler.unscale_(optimizer)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         if dist.get_rank(dp_pg) == 0:
             tp_rank = mesh_2d.get_local_rank("tp")
@@ -297,10 +331,18 @@ def fine_tune_llama32(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run LLaMA fine-tuning with TP+DDP")
-    parser.add_argument("--device", type=str, required=True, choices=["cuda", "qaic"],
-                        help="Device type: 'cuda' or 'qaic'")
+    parser.add_argument(
+        "--device",
+        type=str,
+        required=True,
+        choices=["cuda", "qaic"],
+        help="Device type: 'cuda' or 'qaic'",
+    )
     parser.add_argument("--tp", type=int, required=True, help="Tensor Parallelism Size")
     parser.add_argument("--dp", type=int, required=True, help="Data Parallelism Size")
+    parser.add_argument(
+        "--use_amp", action="store_true", help="Use Automatic Mixed Precision"
+    )
     args = parser.parse_args()
 
     fine_tune_llama32(args)
