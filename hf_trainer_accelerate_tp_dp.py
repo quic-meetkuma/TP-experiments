@@ -127,8 +127,6 @@ def setup_parallelism(tp_size, dp_size):
 
 def create_training_arguments(args, pc):
     """Create training arguments with appropriate settings."""
-    # from trl.trainer.sft_config import SFTConfig
-    # return SFTConfig(
     return TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -140,15 +138,6 @@ def create_training_arguments(args, pc):
         ddp_find_unused_parameters=False,
         remove_unused_columns=True,
         max_grad_norm=None,  # This is the root cause for unscale called twice. Will solve it later.
-        # fsdp='no_shard',
-        # fsdp_config={
-        #     "fsdp_version" : 2,
-        #     "reshard_after_forward" : True,
-        #     "auto_wrap_policy" : "transformer_based_wrap",
-        #     "state_dict_type" : "SHARDED_STATE_DICT",
-        #     "activation_checkpointing" : False,
-        #     "cpu_ram_efficient_loading" : True,
-        # }
     )
 
 
@@ -281,7 +270,6 @@ def apply_peft_to_model(model, tp_mesh=None, peft_params=None):
 
 def load_model(model_name, device_mesh, apply_peft=False):
     """Load model with tensor parallelism."""
-    # if hasattr(device_mesh, )
     tp_enabled = False
     dp_enabled = False
     dp_size = 1
@@ -318,15 +306,10 @@ def load_model(model_name, device_mesh, apply_peft=False):
     # this as separate params in further TP processing
     model.lm_head.weight = nn.Parameter(model.lm_head.weight.clone())
 
+    model.half()
     if apply_peft:
         # Apply PEFT to the model and include PEFT layers in TP plan
         apply_peft_to_model(model, tp_mesh=tp_mesh)
-
-    # _pre_dp_module_transform(model)
-
-    # Wrap with DDP using data parallel group
-    # dp_pg = device_mesh.get_group(mesh_dim=0)
-    # model = DDP(model, process_group=dp_pg)
 
     return model
 
@@ -392,18 +375,6 @@ def main():
     # Load tokenizer
     tokenizer = load_tokenizer(args.model_name)
 
-    # Load model
-    # device_mesh = pc.get_device_mesh(args.force_device)
-
-    # Setup 2D device mesh
-    # mesh_2d = init_device_mesh(
-    #     args.force_device,
-    #     (args.dp_size, args.tp_size),
-    #     # (args.dp_size),
-    #     mesh_dim_names=("dp", "tp"),
-    #     # mesh_dim_names=("dp",),
-    # )
-
     model = load_model(args.model_name, device_mesh, args.apply_peft)
     print(f"Model loaded on device: {model.device}")
 
@@ -418,24 +389,12 @@ def main():
     # Create data collator
     data_collator = DataCollatorWithPadding(tokenizer, padding=True, max_length=128)
 
-    # from peft import LoraConfig
-    # from trl import SFTTrainer
-    # peft_config = LoraConfig(
-    #     r=16,                      # rank
-    #     lora_alpha=32,             # scaling factor
-    #     lora_dropout=0.05,          # dropout
-    #     bias="none",
-    #     task_type="CAUSAL_LM",       # task type
-    #     target_modules=["q_proj","v_proj"]
-    # )
-
     # Create trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset,
         data_collator=data_collator,
-        # peft_config=peft_config,
     )
 
     # Train model
