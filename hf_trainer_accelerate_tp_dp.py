@@ -306,7 +306,6 @@ def load_model(model_name, device_mesh, apply_peft=False):
     # this as separate params in further TP processing
     model.lm_head.weight = nn.Parameter(model.lm_head.weight.clone())
 
-    model.half()
     if apply_peft:
         # Apply PEFT to the model and include PEFT layers in TP plan
         apply_peft_to_model(model, tp_mesh=tp_mesh)
