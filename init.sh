@@ -1,7 +1,6 @@
 export HF_HOME=/home/huggingface_hub/
 pip install /opt/qti-aic/integrations/torch_qaic/py310/torch_qaic-0.1.0-cp310-cp310-linux_x86_64.whl --force-reinstall --no-deps
 pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # Install forked transformers
 git clone https://github.com/quic-meetkuma/transformers.git
