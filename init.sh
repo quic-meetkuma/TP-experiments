@@ -13,7 +13,7 @@ cd ..
 # Install forked accelerate
 git clone https://github.com/quic-meetkuma/accelerate.git
 cd accelerate
-git checkout v1.12.0-release-shubham-changes-dp-tp
+git checkout 10_02_26_shubham_changes_dp_tp
 pip install -e .
 
 cd ..

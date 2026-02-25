@@ -16,7 +16,7 @@ from peft import get_peft_model
 from peft import LoraConfig
 
 # Command:
-# QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 hf_trainer_ddp.py --force_device qaic
+# QAIC_VISIBLE_DEVICES=32,33,34,35 torchrun --nproc_per_node=4 --master-port=1234 hf_trainer_ddp.py --force_device qaic --apply_peft
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -110,12 +110,10 @@ def load_model(model_name, apply_peft):
         model_name,
         dtype=torch.float16,
     )
-    # Need to explicitly untie the embedding weights here to consider
-    # this as separate params in further TP processing
-    model.lm_head.weight = nn.Parameter(model.lm_head.weight.clone())
 
     # Apply peft to the model
     if apply_peft:
+        print(f"PEFT modification applied")
         model = apply_peft_to_model(model)
     return model
 

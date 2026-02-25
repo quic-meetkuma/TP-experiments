@@ -266,6 +266,7 @@ def apply_peft_to_model(model, tp_mesh=None, peft_params=None):
 
     # Convert PEFT weights from torch.Tensor to DTensor and apply TP modifications
     apply_tp_modification_for_peft(model, tp_mesh)
+    return model
 
 
 def load_model(model_name, device_mesh, apply_peft=False):
@@ -308,7 +309,7 @@ def load_model(model_name, device_mesh, apply_peft=False):
 
     if apply_peft:
         # Apply PEFT to the model and include PEFT layers in TP plan
-        apply_peft_to_model(model, tp_mesh=tp_mesh)
+        model = apply_peft_to_model(model, tp_mesh=tp_mesh)
 
     return model
 
@@ -363,43 +364,51 @@ def main():
 
     initialize_distributed(args)  # Initialize distributed training
 
-    # Setup tensor parallelism
-    pc = setup_parallelism(args.tp_size, args.dp_size)
-    device_mesh = pc.build_device_mesh(args.force_device)
-    print(f"Device Mesh: {device_mesh}")
+    try:
+        # Setup tensor parallelism
+        pc = setup_parallelism(args.tp_size, args.dp_size)
+        device_mesh = pc.build_device_mesh(args.force_device)
+        print(f"Device Mesh: {device_mesh}")
+        
+        # Create training arguments
+        training_args = create_training_arguments(args, pc)
 
-    # Create training arguments
-    training_args = create_training_arguments(args, pc)
+        # Load tokenizer
+        tokenizer = load_tokenizer(args.model_name)
 
-    # Load tokenizer
-    tokenizer = load_tokenizer(args.model_name)
+        model = load_model(args.model_name, device_mesh, args.apply_peft)
+        print(f"Model loaded on device: {model.device}")
 
-    model = load_model(args.model_name, device_mesh, args.apply_peft)
-    print(f"Model loaded on device: {model.device}")
+        # Create dataset
+        dataset = create_dummy_dataset()
 
-    # Create dataset
-    dataset = create_dummy_dataset()
+        # Tokenize dataset
+        tokenized_dataset = dataset.map(
+            lambda x: tokenize_function(x, tokenizer), batched=True
+        )
 
-    # Tokenize dataset
-    tokenized_dataset = dataset.map(
-        lambda x: tokenize_function(x, tokenizer), batched=True
-    )
+        # Create data collator
+        data_collator = DataCollatorWithPadding(tokenizer, padding=True, max_length=128)
 
-    # Create data collator
-    data_collator = DataCollatorWithPadding(tokenizer, padding=True, max_length=128)
+        # Create trainer
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_dataset,
+            data_collator=data_collator,
+        )
 
-    # Create trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_dataset,
-        data_collator=data_collator,
-    )
-
-    # Train model
-    trainer.train()
-    print("Training complete!")
-
+        # Train model
+        trainer.train()
+        print("Training complete!")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        raise e
+    finally:
+        # Clean up distributed training
+        if dist.is_initialized():
+            print("Distributed training cleaned up.")
+            dist.destroy_process_group()  # Ensure cleanup happens even if an error occurs
 
 if __name__ == "__main__":
     main()
